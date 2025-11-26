@@ -18,13 +18,8 @@ The dataset includes key vital signs, diagnosis and general characteristics (age
 * Model selection (logistic regression, XGBoost (more to be added))
 * Evaluation metrics (AUC ROC)
 
-  ## Results
-
-  ## Installation/ usage
-  (how can someone run this code)
-
-  ## Future work
-  (ideas for improving/ extending the project?) 
-
-# Evaluation 
+## Results/ Evaluation
 The main evaluation metric used will be ROC AUC. This is chosen as a common metric used in binary classification models. 
+
+## Future work
+- ideas for improving/ extending the project (more to be added) 
