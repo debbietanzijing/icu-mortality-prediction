@@ -89,6 +89,9 @@ As age is not explicitly given, it is calculated as the difference between the A
 #### 3.4.2 One- hot encoding of categorical variables (model matrix)
 One hot enoding was performed using `model.matrix()` to convert categorical variables into a set of binary indicator columns. This transformation is required as machine learning models requires numeric inputs and is unable to inter[ret categorical text variables directly. 
 
+#### 3.4.3 Standardisation of numeric variables 
+All numeric predictors were standardised using z- score normalisation. For each variable, the mean and standard deviation were computed from the training set, and used to transform both the training and testing set. This ensures each predictor has a mean of 0 and standard deviation of 1. Standardization was done to ensure comprability between different predictors and support algorithms sensitive to variable scale. 
+
 # Analysis 
 ### 4.1 Modelling Approach 
 * Baseline: Logistic Regression
