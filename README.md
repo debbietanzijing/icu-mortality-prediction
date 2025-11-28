@@ -50,10 +50,10 @@ Train- 20, 855 observations
 A general rule of thumb (10) has been set to determine if a variable was at risk for high sparsity. High cardinality variables creates very sparse, huge matrices, and will result in overfitting, along with making modelling unstable. All categorical variables with the exception of `Diagnosis` have <10 cardinality.
 
 Two methods were explored to manage `Diagnosis`: 
-1. Target encoding
+1. Target encoding  
 Mortality rate will be computed for each ICD-9 diagnosis group. However, there are some very common ICD groups (common diseases with thousands of patients), and some that are very rare (rare diseases with only 1-5 patients). Naively computing the mortality rate as (number of deaths/ number of cases) will give very extreme and unreliable values. I will be solving this issue with *Laplace Smoothing*, to prevent noise from rare categories skewing the model. The average death rate is calculated as the baseline mortality rate (number of deaths/ total number of patients), to be used as the  prior belief. A weight of 2 is assigned to the average death rate, meaning that each ICD group is given +2 extra virtual patients. This ensures that the rare ICD9 codes are not given extreme rates due to a small sample size. The smoothed rate (posterior) will now be (deaths + 2 * average death rate)/ (number of cases + 2)
 
-3. Regex
+3. Regex  
 Keyword matching pattern was used to group diagnosis into broader categories (e.g. 'resp|pneumon|bronch under 'Respiratory' conditions). Conditions with a frequency count of >20 was left as it is, and unmatched conditions were grouped under 'Rare diseases'.
 Overall, I achieved a 75% reduction in cardinality- but still had significant number of 130 diagnosises uncategorised. Therefore, the target encoding methodology will be used instead.  
 
