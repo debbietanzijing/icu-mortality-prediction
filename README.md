@@ -61,7 +61,7 @@ Overall, I achieved a 75% reduction in cardinality- but still had significant nu
 
 #### Multicollinearity
 A correlation matrix was created to display a heat map of variables with high correlation.  
-[insert image here]
+![Correlation matrix showing a heat map of numerical variables](visuals/correlation_matrix.png)
 
 Findings: 
 * Strong within modal correlations for Min, Max and Mean values of each vital signs (especially for blood pressure, heart rate). These clusters indicate high redundancy, as the measures reflect the same underlying physiogic processes
@@ -72,7 +72,7 @@ Variables with a collinearity value of >0.8 will be dropped, as they are redunda
 
 #### Max- min variability  
 Max- min differences in vital signs was used to quanity physiologic instability (bigger swings in vital signs tend to occur more in critical conditions). Althought not a formal feature selection method, physiological instability can guide explanability when used alongside model based feature importance methods. 
-[insert image here]
+![Box plot showing min- max differences in vital signs](visuals/min_max_diff.png)
 
 Findings: 
 * Across most vital signs, patients who died (Mortality = 1) shows a larger variability, a pattern consistent with clinical expections (physiologic instability being associated with mortality risk) 
@@ -85,6 +85,8 @@ Overall, patterns indicate that greater physiologic fluctuations and instability
 
 #### 3.4.1 Categorisation of age 
 As age is not explicitly given, it is calculated as the difference between the ADMIT TIME and DOB. There is an outlier of >300 years, and will be removed. 
+
+![Histogram showing distributin of age](visuals/histogram_age.png)
 
 #### 3.4.2 One- hot encoding of categorical variables (model matrix)
 One hot enoding was performed using `model.matrix()` to convert categorical variables into a set of binary indicator columns. This transformation is required as machine learning models requires numeric inputs and is unable to inter[ret categorical text variables directly. 
