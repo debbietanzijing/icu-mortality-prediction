@@ -41,6 +41,14 @@ Train- 20, 855 observations
 
 ## 3. Initial Data Exploration 
 
+### 3.1 Initial look at the dataset 
+
+A baseline descriptive analysis (Table 1) was generated to summarise the key demographic and clinical variables across survivors and non- survivors. It is useful for early identification of potential predictors, detecting data anomalies and justifying variable selection in subsequent modelling. 
+
+Almost all variables showed statistically significant (p<0.001) differences. Non survivors have significantly max/ mean heart rates, elevated respiratory rates, lower blood pressure, reduced oxygen saturation and higher glucose levels. These findings are consistent with existing knowledge of hemodynamic instability being associated with mortality rate. Several variables (heart rate, respiratory rate, minimum oxygen saturaton and glucose) displayed high variances, indicating that physiology in these domains varies considerably. In contrast, measures such as temperature and mean oxygen saturation have relatively narrow variances.
+
+Although Table 1 is useful for describing baseline characteristics, the p-values provided are univariate comparisons (is there a significant difference between the two classes?). The p- values do not indicate if the variable is useful in a multivariate predictive model. Therefore, although some variables (min heart rate etc) does not have a statistically significnat p value, they may still contribute meaningfully through interactions and non- linear relationships. 
+ 
 ### 3.1 Data Cleaning 
 * There is a class imbalance in the dataset (11% mortality rate)
 * There are no missing values in the dataset
