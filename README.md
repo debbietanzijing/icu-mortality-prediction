@@ -125,7 +125,7 @@ Out of the true deaths, the model correctly identified 17.3% (sensitivity). On t
 
 ![PR curve](visuals/PR_curve.png)
 
-The precision- recall AUC shows that the model performs roughly 3x better than random chance (baseline prevalence = 0.11), indicating a modest ability to detect mortality.  
+The precision- recall AUC shows that the model performs roughly 3x better than random chance (baseline prevalence = 0.11), indicating a modest ability to detect mortality. As compared to a regular ROC curve, the PR- AUC focuses on the positive class. 
 
 By reducing the classification threshold to 0.11- sensitivty is increased to 58% while retaining reasonable specificity, demonstrating the importance of threshold tuning for clinical data. Physiologically, tachycardia, tachypnea, hyperglycemia (positive coefficients), low o2 saturation and hypotension (negative coefficients) were correctly identified as signficantly important predictors, giving confidence in the clinical interpretability of the model. 
 
