@@ -1,0 +1,520 @@
+---
+title: "icu_predict_xgboost"
+author: "Debbie"
+date: "2025-05-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Requirements}
+set.seed(123)
+
+library(readxl)
+library(readr)
+library(tidyverse)
+library(skimr)
+library(janitor)
+library(dplyr)
+library(forcats)
+library(lubridate)
+library(caret)
+library(glmnet)
+library(Matrix)
+library(pROC)
+library(rpart)
+library(rpart.plot)
+library(xgboost)
+library(ggplot2)
+library(gganimate)
+library(transformr)
+library(parsnip)
+library(yardstick)
+library(rpart.plot)
+```
+
+```{r Load and merge datasets}
+train_y <- as_tibble(read_csv("mimic_train_y.csv")[,-1]) # remove column id, conversion into a tibble
+train_X <- as_tibble(read_csv("mimic_train_X.csv")[,-1])
+test_X <- as_tibble(read_csv("mimic_test_X.csv")[,-1])
+metadata <- read_csv("MIMIC_metadata_diagnose.csv")
+
+train_y %>% slice_head(n=5) # predictive outcome
+train_X %>% slice_head(n=5) # predictive features
+metadata %>% slice_head(n=5) # diagnosis with code 
+
+train <- inner_join(train_X, train_y, by= "icustay_id")
+train %>% slice_head(n=5)
+
+glimpse(train)
+```
+```{r Checking for class imbalance}
+prop.table(table(train_y$HOSPITAL_EXPIRE_FLAG)) 
+```
+This is an unbalanced data set with 11% mortality rate. This will be a consideration on the metrics chosen for determining accuracy down the pipeline. 
+```{r Checking for missing values}
+train %>% summarise_all(~sum(is.na(.)))
+test_X %>% summarise_all(~sum(is.na(.)))
+
+```
+#### Categorical variables 
+
+```{r Checking the cardinality for categorical variables}
+train %>% 
+  select(GENDER:FIRST_CAREUNIT) %>% 
+  summarise_all(n_distinct)
+
+test_X %>% 
+  select(GENDER:FIRST_CAREUNIT) %>% 
+  summarise_all(n_distinct)
+```
+Both training and testing data sets have the same cardinality 
+
+```{r Conversion of categorical variables into dummies}
+train <- train %>% 
+  mutate(as.data.frame(model.matrix(~0 + GENDER, data = cur_data()))) %>% 
+  select(-GENDER) %>% 
+  mutate(as.data.frame(model.matrix(~0, + ADMISSION_TYPE, data = cur_data()))) %>%
+  select(-ADMISSION_TYPE) %>% 
+  mutate(as.data.frame(model.matrix(~0 + INSURANCE, data = cur_data()))) %>% 
+  select(-INSURANCE) %>% 
+  mutate(as.data.frame(model.matrix(~0 + RELIGION, data = cur_data()))) %>% 
+  select(-RELIGION) %>% 
+  mutate(as.data.frame(model.matrix(~0, + MARITAL_STATUS, data = cur_data()))) %>% 
+  select(-MARITAL_STATUS) %>% 
+  mutate(as.data.frame(model.matrix(~0 + ETHNICITY, data = cur_data()))) %>% 
+  select(-ETHNICITY) %>% 
+  mutate(as.data.frame(model.matrix(~0 + FIRST_CAREUNIT, data= cur_data()))) %>% 
+  select(-FIRST_CAREUNIT)
+
+test_X <- test_X %>% 
+  mutate(as.data.frame(model.matrix(~0 + GENDER, data = cur_data()))) %>% 
+  select(-GENDER) %>% 
+  mutate(as.data.frame(model.matrix(~0, + ADMISSION_TYPE, data = cur_data()))) %>%
+  select(-ADMISSION_TYPE) %>% 
+  mutate(as.data.frame(model.matrix(~0 + INSURANCE, data = cur_data()))) %>% 
+  select(-INSURANCE) %>% 
+  mutate(as.data.frame(model.matrix(~0 + RELIGION, data = cur_data()))) %>% 
+  select(-RELIGION) %>% 
+  mutate(as.data.frame(model.matrix(~0, + MARITAL_STATUS, data = cur_data()))) %>% 
+  select(-MARITAL_STATUS) %>% 
+  mutate(as.data.frame(model.matrix(~0 + ETHNICITY, data = cur_data()))) %>% 
+  select(-ETHNICITY) %>% 
+  mutate(as.data.frame(model.matrix(~0 + FIRST_CAREUNIT, data= cur_data()))) %>% 
+  select(-FIRST_CAREUNIT)
+
+train <- train %>% 
+  select(-c(DIAGNOSIS))
+test_X <- test_X %>% 
+  select(-c(DIAGNOSIS))
+```
+
+A general rule of thumb (10) has been set to determine if a variable was at risk for high sparsity. High cardinality variables creates very sparse, huge matrices. This will potentially result in over fitting the data, and making modelling unstable. All categorical variables are converted with the exception of `Diagnosis`. The `ICD9` code provided in the metadata that references `Diagnosis` will be used in target encoding instead. 
+
+```{r Calculating age}
+train <- train %>% mutate(
+  Age = as.numeric(difftime(ADMITTIME, DOB, units = "days"))/ 365.25) %>%
+  select(-c(ADMITTIME, DOB, Diff))
+
+test_X <- test_X %>% mutate(
+  Age = as.numeric(difftime(ADMITTIME, DOB, units = "days"))/ 365.25) %>% 
+  select(-c(ADMITTIME, DOB, Diff))
+
+summary(train$Age)
+hist(train$Age)
+
+summary(test_X$Age)
+hist(test_X$Age)
+
+train <- train %>% 
+  mutate(Age = pmin(Age, 100))
+
+test_X <- test_X %>% 
+  mutate(Age = pmin(Age, 100))
+```
+
+The difference in days is calculated between the admission time `ADMITTIME` and date of birth `DOB`. The number of days is divided by 365.25 to convert days into years (while accounting for leap year). It is wrapped in `as.numeric()` to convert datetime object into a numeric. 
+
+*Any processing done to the training data will be done concurrently with the testing data* 
+ 
+Both data sets show a huge outlier of > 250 years of age. As this is factually incorrect, both data sets will be trimmed down to 100. 
+
+### Target encoding to transform ICD9 diagnosis codes into smoothed mortality rate features 
+
+```{r}
+# Baseline mortality rate 
+av_deathrate <- sum(train$HOSPITAL_EXPIRE_FLAG) / length(train$HOSPITAL_EXPIRE_FLAG)
+
+# Smoothing rate 
+weight_av_deathrate <- 2  
+
+# ICD specific smoothed death rate to push smaller groups towards the global mean 
+deathrate <- train |> 
+    group_by(ICD9_diagnosis) |>
+    summarize(Mean = (sum(HOSPITAL_EXPIRE_FLAG) + weight_av_deathrate*av_deathrate)/(length(HOSPITAL_EXPIRE_FLAG) + weight_av_deathrate))
+
+# Adding a column to store ICD death rate 
+train <- train |>
+  mutate(ICD9_DEATH_RATE = rep(NA, nrow(train)))
+
+# Assigning each patient their ICD9 death rate 
+for(i in 1:nrow(train)){
+  train$ICD9_DEATH_RATE[i] <- deathrate$Mean[which(deathrate$ICD9_diagnosis == train$ICD9_diagnosis[i])]
+}
+
+# If ICD does not exist in the test set, the global death rate is used instead 
+test_X <- test_X |>
+  mutate(ICD9_DEATH_RATE = rep(NA, nrow(test_X)))
+
+for(i in 1:nrow(test_X)){
+  try(test_X$ICD9_DEATH_RATE[i] <- deathrate$Mean[which(deathrate$ICD9_diagnosis == test_X$ICD9_diagnosis[i])], silent = TRUE)
+  if(is.na(test_X$ICD9_DEATH_RATE[i])){
+    test_X$ICD9_DEATH_RATE[i] <- av_deathrate
+  }
+}
+
+# Removing ICD9 code from both data sets 
+train <- train |> 
+  select(-c(ICD9_diagnosis))
+
+test_X <- test_X |> 
+  select(-c(ICD9_diagnosis))
+```
+
+Code: 
+av_deathrate: as the outcome measure is binary (0 contributes nothing, 1 contributes one), the sum of the column will equal the total number of deaths. 
+- this is used to determine the *baseline mortality rate* to be used as a global prior, so the rare ICD9 codes do not get extreme rates from tiny samples. 
+(concept of laplace smoothing, bayesian prior)
+
+### Another method to maintain high cardinality in diagnosis 
+
+```{r Handling cardinality in diagnosis}
+train_data <-train_data %>% 
+           mutate(SHORT_DIAGNOSE = ifelse(is.na(SHORT_DIAGNOSE), "UNKNOWN", SHORT_DIAGNOSE)) %>% 
+  add_count(SHORT_DIAGNOSE, name = 'freq') %>% # adding a frequency count 
+  mutate(SHORT_GROUPED = case_when(
+    
+    grepl('resp|pneumon|bronch', SHORT_DIAGNOSE, ignore.case = TRUE) ~ 'Respiratory', 
+    grepl('hemorrh|athrscl|aortic|valve|hrt|atrial|emblsm|infarct|AMI', SHORT_DIAGNOSE, ignore.case = TRUE) ~ 'Cardiovascular', 
+    grepl('kidney|gastro|pancreat|colon|liver', SHORT_DIAGNOSE, ignore.case = TRUE) ~ 'GI', 
+    grepl('neoplasm|mal neo|cancer', SHORT_DIAGNOSE, ignore.case = TRUE) ~ 'Neoplasms', 
+    grepl('infection|septicemia|sepsis', SHORT_DIAGNOSE, ignore.case = TRUE) ~ 'Infectious diseases',
+    freq >=20 ~ SHORT_DIAGNOSE, 
+    TRUE ~ 'Other rare diseases')) 
+
+n_distinct(train_data$SHORT_DIAGNOSE) - n_distinct(train_data$SHORT_GROUPED)
+```
+
+Keyword pattern matching was used to reduce cardinality in `DIAGNOSIS`. Common keywords were used to group conditions into broad categories such as 'Cardiovascular', 'Respiratory'. Conditions with a frequency count of >20 was left as it is, and unmatched conditions with (<20 count) was grouped under 'Other rare diseases'. Missing values were grouped under 'UNKNOWN'
+
+There is a reduction of 413 groups (>75% reduction) after grouping. This is good, but 130 groups is still a significant amount. ICD9_Diagnosis will be used instead. 
+
+## Checking on variability in vital signs
+
+```{r}
+train_data <- train_data %>%
+  mutate(
+    HeartRate_Diff = HeartRate_Max - HeartRate_Min,
+    SysBP_Diff     = SysBP_Max - SysBP_Min,
+    DiasBP_Diff    = DiasBP_Max - DiasBP_Min,
+    MeanBP_Diff    = MeanBP_Max - MeanBP_Min,
+    RespRate_Diff  = RespRate_Max - RespRate_Min,
+    TempC_Diff     = TempC_Max - TempC_Min,
+    SpO2_Diff      = SpO2_Max - SpO2_Min
+  )
+train_long_Diff <- train_data %>%
+  select(HOSPITAL_EXPIRE_FLAG, ends_with("_Diff")) %>%
+  pivot_longer(-HOSPITAL_EXPIRE_FLAG, names_to = "Variable", values_to = "Value")
+
+ggplot(train_long_Diff, aes(x = as.factor(HOSPITAL_EXPIRE_FLAG), y = Value, fill = as.factor(HOSPITAL_EXPIRE_FLAG))) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+  facet_wrap(~ Variable, scales = "free", ncol = 2) +
+  labs(x = "Mortality (0 = Alive, 1 = Death)", y = "Delta Value", title = "Vital Sign Variability by Mortality") +
+  coord_cartesian(ylim = c(0, 100)) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+The subplots identify variables showing a higher variability in vital signs. In other words, patients show higher fluctuations in vital signs in their blood pressure (diastolic, systolic and mean) and heart rate. Notably, patients who are alive show a higher variability in heart rate than those that are not.
+
+## Checking on collinearity between variables 
+```{r}
+numeric_vars <- train_data %>%  
+  select(-icustay_id) %>%
+  select(where(is.numeric))
+numeric_long <- numeric_vars %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value")
+
+
+cor_matrix <- cor(numeric_vars, use = "pairwise.complete.obs")
+corrplot::corrplot(cor_matrix, method = "color", tl.cex = 0.6)
+
+high_corr_indices <- findCorrelation(cor_matrix, cutoff = 0.8)
+names(numeric_vars)[high_corr_indices]
+```
+The correlation matrix above displays a heat map of variables with high correlation. Variables with a collinearity value of >0.8 will be dropped. 
+
+## Checking for repeated ICU visits (kiv to remove)
+
+```{r}
+# train_X <- train |>
+#   select(-HOSPITAL_EXPIRE_FLAG) # removed from test set prevent contamination 
+# 
+# appearences <- rbind(train_X, test_X) |> 
+#   count(subject_id) # stacking both splits vertically to count frequency on number of visits
+# 
+# train <- train |> # initialize new column, and assigning count to subject_id
+#   mutate(prev_visits = rep(NA, nrow(train))) 
+# for(i in 1:nrow(train)){
+#   train$prev_visits[i] <- appearences$n[which(appearences$subject_id == train$subject_id[i])]
+# }
+# 
+# test_X <- test_X |>
+#   mutate(prev_visits = rep(NA, nrow(test_X)))
+# for(i in 1:nrow(test_X)){
+#   test_X$prev_visits[i] <- appearences$n[which(appearences$subject_id == test_X$subject_id[i])]
+# }
+```
+
+
+```{r}
+train <- train |> 
+  select(-c(subject_id, hadm_id, icustay_id)) # remove identifying columns 
+
+
+test_icustay_id <- test_X |> 
+  select(icustay_id)
+
+test_X <- test_X |> 
+  select(-c(subject_id, hadm_id, icustay_id))
+```
+
+This feature captures the number of ICU admissions in the patient history across the whole data environment. Both testing and training data sets were stacked vertically together, to determine the number of appearances. This was then assigned to `prev_visits`, a master count that will now appear in both data sets. This feature is significant as repeated visits may indicate a chronic illness burden and a higher baseline risk. 
+
+Identifiers such as `subject_id`, `hadm_id` and `icustay_id` was removed as they do not have any predictive vales. 
+
+## Cleaning variable names with spaces and punctuations
+```{r}
+colnames(train) <- gsub(" ", "", colnames(train), fixed = TRUE)
+colnames(test_X) <- gsub(" ", "", colnames(test_X), fixed = TRUE)
+colnames(train) <- gsub("(", "", colnames(train), fixed = TRUE)
+colnames(train) <- gsub(")", "", colnames(train), fixed = TRUE)
+colnames(test_X) <- gsub("(", "", colnames(test_X), fixed = TRUE)
+colnames(test_X) <- gsub(")", "", colnames(test_X), fixed = TRUE)
+```
+
+## Standardization 
+```{r}
+# Standardizing only the numeric predictors 
+train_X <- train |>
+  select(where(is.numeric)) %>%
+  select(-HOSPITAL_EXPIRE_FLAG)
+
+test_X <- test_X %>%
+  select(where(is.numeric)) 
+
+# Dropping unnecessary columns 
+cols_train_drop <- c("...1.x", "...1.y")
+cols_test_drop <- c("...1")
+
+# Ensure exact matching with the column names
+train_X <- train_X %>% select(-all_of(cols_train_drop))
+test_X <- test_X %>% select(-all_of(cols_test_drop))
+
+means <- apply(train_X, 2, mean)
+sds <- apply(train_X, 2, sd)
+
+train_X_sd <- train_X |>
+ scale(center = means, scale = sds) |>  as_tibble()
+test_X_sd <- test_X |>
+  scale(center = means, scale = sds) |>
+    as_tibble()
+
+# Manual way for more fine grained control
+
+# train_X_sd <- train_X
+# test_X_sd <- test_X 
+# for(j in 1:ncol(train_X)){
+#   train_X_sd[,j] <- (train_X_sd[,j] - means[j])/sds[j]
+#   test_X_sd[,j] <- (test_X_sd[,j] - means[j])/sds[j]
+# }
+
+# Adding the target variable back to the standardized training set 
+train <- train_X_sd |>
+  mutate(HOSPITAL_EXPIRE_FLAG = train$HOSPITAL_EXPIRE_FLAG)
+```
+
+# Data visualization
+
+```{r Performing PCA by calculating cumulative proportionof variance explained by each PC}
+train_pca_data <- train %>%
+  select(HeartRate_Min:Age) %>%
+  filter(if_all(everything(), ~ is.finite(.) & !is.na(.)))
+
+train_pca <- prcomp(train_pca_data, center = FALSE, scale. = FALSE)
+
+# Dividing cumulative variance by total sum gives the cumulative proportion of each variance explained
+cumsum(train_pca$sdev^2)/sum(train_pca$sdev^2)
+```
+PC1 explains 20.6% of total variance. First 2PCs explain 55%
+
+```{r Creating a scree/ elbow plot}
+train_pca_var <- tibble(n=1:length(train_pca$sdev), evl=train_pca$sdev^2)
+ggplot(train_pca_var, aes(x=n, y=evl)) + geom_line() +
+  xlab("Number of PCs") + ylab("Eigenvalue") +
+  theme_minimal(base_size = 18)
+
+# Lower dimensional representation of the data
+train_pca_data_reduced <- as_tibble(train_pca$x[, 1:7])
+```
+From the scree/ elbow plot, 7 PCs will be a good number to keep. It captures most of the variance (~ 77%). It retains informative structure while reducing noise. By using PCA- I am reducing dimensionality and preventing overfitting of the model. 
+
+# Model fitting 
+
+```{r Fitting logistic regression model }
+logistic_model <- logistic_reg() %>% 
+  set_engine("glm") %>% 
+  set_mode("classification")
+
+# Copying dataset 
+train_logistic_reg <- train
+train_logistic_reg$HOSPITAL_EXPIRE_FLAG <- as.factor(train_logistic_reg$HOSPITAL_EXPIRE_FLAG)
+
+# Fitting the model
+logistic_fit <- 
+  logistic_model %>% 
+  fit(HOSPITAL_EXPIRE_FLAG~., data = train_logistic_reg)
+
+# Augment predictions to the training data 
+train_logistic_reg <- augment(logistic_fit, train_logistic_reg, type = "probability")
+
+# Evaluation with ROC AUC 
+roc_auc(train_logistic_reg, HOSPITAL_EXPIRE_FLAG, .pred_0)
+```
+use of pred_1 to estimate the event of interest (death)
+
+issue: 
+- rank- deficient fit. this occurs when the model cannot unqiuely estimate all coefficients as some predictors are perfectly correlated or are linear combinations of others. the warning suggests the features are not contributing. 
+
+the model will be re- run with the pca- reduced dataset. 
+
+
+What is it? 
+Supervised learning for classification problem. The model uses a sigmoid function (with a threshold of 0.5) to convert continuous inputs into a meaningful class prediction. In this case, a binomial logistic regression model will be used to predict the binary outcome of death, `HOSPITAL_EXPIRE_FLAG`. 
+
+Assumptions: 
+* Independent observations 
+* Linear relationship between independent variable and log odds
+* No extreme outliers 
+
+```{r}
+
+train_features <- train[, -which(names(train) == "HOSPITAL_EXPIRE_FLAG")]
+train_pca <- prcomp(train_features, center = TRUE, scale. = TRUE)
+train_pca_data_reduced <- as_tibble(train_pca$x[, 1:7])  # Keep top 7 PCs
+train_pca_data_reduced$HOSPITAL_EXPIRE_FLAG <- as.factor(train$HOSPITAL_EXPIRE_FLAG)
+
+
+log_pca_fit <- logistic_model |>
+  fit(HOSPITAL_EXPIRE_FLAG ~ ., data = train_pca_data_reduced)
+
+train_pca_augmented <- augment(log_pca_fit, train_pca_data_reduced, type = "probability")
+roc_auc(train_pca_augmented, HOSPITAL_EXPIRE_FLAG, .pred_0)
+
+```
+Potential reasons: 
+- class imbalance. there is a bias towards predicting the majority class. 
+Current model (especially raw data) is not capturing the signal required to separate classes. PCA is moderately helping, but insufficient. Logistic regression may be too limited. 
+
+```{r Decision Tree fitting}
+train_DT <- train
+train_DT$HOSPITAL_EXPIRE_FLAG <- as.factor(train_DT$HOSPITAL_EXPIRE_FLAG)
+
+# Fit the default tree model
+tree_spec <- decision_tree() |>
+  set_mode("classification") |>
+  set_engine("rpart")
+
+DT_fit <- tree_spec |>
+  fit(HOSPITAL_EXPIRE_FLAG~., data=train_DT)
+
+DT_fit |>
+  extract_fit_engine() |>
+  rpart.plot(type=3, extra=1)
+```
+The tree selects the most predictive features and thresholds based on the data. Each split is chosen to maximize information gain (entropy) or minimize purity (gini impurity)
+
+Complexity parameter (`cp`): penalty factor (how much does it improve the model fit?)
+Minimum split (`minsplit`): minimum sample size for a split 
+Maximum depth (`maxdepth`): controls number of layers (prevent over fitting)
+
+```{r}
+## training errors
+
+train_DT <- augment(DT_fit, train_DT, type="probability")
+
+roc_auc(train_DT, HOSPITAL_EXPIRE_FLAG, .pred_0)
+```
+```{r}
+tuning_indexes <- sample(1:20885, size = 5000, replace = FALSE)
+
+
+train_DT_tuned <- train
+train_DT_tuned$HOSPITAL_EXPIRE_FLAG <- as.factor(train_DT_tuned$HOSPITAL_EXPIRE_FLAG)
+
+train_DT_tuned_sub <- train_DT_tuned[tuning_indexes,]
+
+tune_spec <- 
+  decision_tree(
+    cost_complexity = tune(),
+    tree_depth = tune(),
+    min_n = tune()
+  ) |> 
+  set_engine("rpart") |> 
+  set_mode("classification")
+
+tree_grid <- grid_regular(cost_complexity(),
+                          tree_depth(),
+                          min_n(),
+                          levels = 3)
+```
+
+```{r}
+set.seed(234)
+d_folds <- vfold_cv(train_DT_tuned_sub, v = 5)
+
+set.seed(345)
+
+tree_wf <- workflow() |>
+  add_model(tune_spec) |>
+  add_formula(HOSPITAL_EXPIRE_FLAG ~ .)
+
+tree_res <- 
+  tree_wf |> 
+  tune_grid(
+    resamples = d_folds,
+    grid = tree_grid
+    )
+```
+
+```{r}
+tree_res |>
+  collect_metrics() |>
+  filter(.metric == "roc_auc") |>
+  mutate(tree_depth = factor(tree_depth)) |>
+  ggplot(aes(cost_complexity, mean, 
+             color = tree_depth, 
+             group = interaction(tree_depth, min_n))) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ min_n, ncol = 5) +
+  #scale_x_log10(breaks = c(0.0000000001, 0.0000000178, 0.00000316, 0.000562, 0.1), labels = as.character(c(0.0000000001, 0.0000000178, 0.00000316, 0.000562, 0.1))) +
+  scale_x_log10() +
+  scale_color_viridis_d(option = "plasma", begin = .9, end = 0) +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(
+          size=8, angle=70, hjust=1))
+```
+number of splits- different values of splits 
