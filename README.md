@@ -117,13 +117,13 @@ All numeric predictors were standardised using z- score normalisation. For each 
 
 A baseline logistic regression model was fitted, as it provided interpretable odds ratio. 
 
-![Key summary of model evaluation](visuals/model_evaluation.png)
+![Key summary of model evaluation](visuals/model_evaluation.jpg)
 
 Based on the confusion metric, the model correctly predicted 18, 116 (TN) survivals and 408 non- survivors (TP). However, it falsely predicted 1937 survivals (FN) and 424 deaths (FP). The model shows an accuracy of 0.89 but this is meaningless as the dataset is highly imbalanced.  
 
 Out of the true deaths, the model correctly identified 17.3% (sensitivity). On the other hand, it was able to correctly identify 97.7% of those who survivors. In other words, the model is very good at detecting people who survive, which is typical in inbalanced dataset as the model learns from the majority class. The model also achieved a precision of 49%, which is decent given the low base prevalence (~11%). Lastly, it has a balanced accuracy of 0.58- indicating that the model is only moderately better than random at identifying both classes equally. A Kappa score of 0.21 backs it up, showing that the model mostly learns the majority class. 
 
-![PR curve](visuals/PR_curve.png)
+![PR curve](visuals/PR_curve.jpg)
 
 The precision- recall AUC shows that the model performs roughly 3x better than random chance (baseline prevalence = 0.11), indicating a modest ability to detect mortality. As compared to a regular ROC curve, the PR- AUC focuses on the positive class. 
 
